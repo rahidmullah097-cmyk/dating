@@ -55,6 +55,7 @@ class TeeLogger:
 # CONFIG — Modifica qui per cambiare il comportamento del bot
 # ============================================================
 
+
 # --- Logging ---
 LOG_ACTIVE = False
 LOG_UPLOAD_INTERVAL = random.randint(500, 800)
@@ -91,6 +92,7 @@ DNS_TIMEOUT_EC2 = 3
 MAX_IPS_PER_CIDR = 2
 TOTAL_SLOTS = 2000
 NUM_WORKERS = 1
+
 
 # ============================================================
 # FINE CONFIG
@@ -619,6 +621,12 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
                     try:
                         content = read_body(r)
                         content_lower = content.lower()
+
+                        # HTML detection: se risponde con HTML non e' un vero .env
+                        head = content_lower[:200]
+                        if '<html' in head or '<!doctype' in head or '<body' in head:
+                            r.close()
+                            continue
 
                         # False positive check
                         if '<pre' in content_lower and '</pre>' in content_lower:
