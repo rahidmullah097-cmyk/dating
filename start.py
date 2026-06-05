@@ -106,7 +106,7 @@ INSTANCE_ID = _SLOT_HASH % TOTAL_SLOTS
 
 # Paths assoluti (usati da upload e da _scan_site)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-result_dir = os.path.join(_SCRIPT_DIR, 'output')
+result_dir = os.path.join(_SCRIPT_DIR, 'risultati')
 newpathtextract = os.path.join(result_dir, 'DATA_SPLIT')
 SITE_DIR = os.path.join(_SCRIPT_DIR, 'site')
 
