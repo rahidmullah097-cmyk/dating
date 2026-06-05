@@ -623,6 +623,7 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
                         # HTML detection: se risponde con HTML non e' un vero .env
                         head = content_lower[:200]
                         if '<html' in head or '<!doctype' in head or '<body' in head:
+                            print(f"  [!] HTML skip | {r.url}", flush=True)
                             r.close()
                             continue
 
