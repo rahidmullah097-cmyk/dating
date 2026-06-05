@@ -608,12 +608,12 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
         # ============================================================
         env_batches = site_payloads.get('env', [])
         for batch in env_batches:
-            if fake_for_site or found_for_site: break
+            if fake_for_site or found_for_site: return
             reqss = [grequests.get(url, stream=True, timeout=6, verify=False, allow_redirects=False, headers=headers_range) for url in batch]
             merdb = grequests.map(reqss)
 
             for r in merdb:
-                if fake_for_site or found_for_site: break
+                if fake_for_site or found_for_site: return
                 if r is not None and r.status_code in [200, 206]:
                     checked += 1
                     try:
@@ -706,13 +706,13 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
         php_batches = site_payloads.get('php', [])
         findfile_requests = []
         for batch in php_batches:
-            if fake_for_site or found_for_site: break
+            if fake_for_site or found_for_site: return
             reqss = [grequests.post(url, data={"0x01[]":"x"}, timeout=6, stream=True, verify=False, allow_redirects=False, headers=headers_range) for url in batch]
             merdb = grequests.map(reqss)
             unique_responses = {}
 
             for r in merdb:
-                if fake_for_site or found_for_site: break
+                if fake_for_site or found_for_site: return
                 if r is not None and r.status_code in [200, 206]:
                     checkeds += 1
                     if r.url not in unique_responses:
