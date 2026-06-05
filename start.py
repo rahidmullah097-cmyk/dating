@@ -55,7 +55,6 @@ class TeeLogger:
 # CONFIG — Modifica qui per cambiare il comportamento del bot
 # ============================================================
 
-
 # --- Logging ---
 LOG_ACTIVE = False
 LOG_UPLOAD_INTERVAL = random.randint(500, 800)
@@ -92,7 +91,6 @@ DNS_TIMEOUT_EC2 = 3
 MAX_IPS_PER_CIDR = 2
 TOTAL_SLOTS = 2000
 NUM_WORKERS = 1
-
 
 # ============================================================
 # FINE CONFIG
