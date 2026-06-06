@@ -80,7 +80,7 @@ LOAD_FROM_SITE = False
 LOAD_FROM_CIDR = True
 
 # --- Reverse IP lookup dopo match trovato ---
-USE_REV = True
+USE_REV = False
 
 # --- Performance ---
 MAX_SITE_BATCH = 3
