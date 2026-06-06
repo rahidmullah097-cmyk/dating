@@ -432,20 +432,21 @@ def read_body(req):
 def get_initial_url(url):
     if url.startswith('http://') or url.startswith('https://'):
         return url
-    if url.endswith(':443'):
+    # Porta esplicita: determina schema dal numero porta, mantieni host:porta
+    port = url.rsplit(':', 1)[-1] if ':' in url else ''
+    if port == '443':
         return f"https://{url}"
-    if url.endswith(':80'):
+    if port == '80':
         return f"http://{url}"
     return f"http://{url}"
 
 def get_retry_url(url):
+    # URL con schema: switcha http<->https mantenendo host e porta
     if url.startswith('http://'):
         return url.replace('http://', 'https://', 1)
     if url.startswith('https://'):
         return url.replace('https://', 'http://', 1)
-    if url.endswith(':443') or url.endswith(':80'):
-        return None
-    return f"https://{url}"
+    return None
 
 def clean_subdomain(sub, domain):
     sub = sub.strip().lower()
@@ -767,20 +768,24 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
         # FASE 2: PHP SCOUTING (POST) — solo se ENV non ha trovato
         # ============================================================
         php_batches = site_payloads.get('php', [])
-        findfile_requests = []
         for batch in php_batches:
             if fake_for_site or found_for_site: break
             reqss = [grequests.post(url, data={"0x01[]":"x"}, timeout=6, stream=True, verify=False, allow_redirects=False, headers=headers_range) for url in batch]
             merdb = grequests.map(reqss)
-            unique_responses = {}
+
+            # Strutture locali al batch (fix bug #4 e #5)
+            unique_urls_batch = set()
+            batch_requests = []          # lista (url, content_str) del batch corrente
+            batch_seen_hashes = set()    # hash visti solo in questo batch
+            batch_wildcard_count = 0     # contatore duplicati del batch corrente
 
             for r in merdb:
                 if fake_for_site or found_for_site: break
                 if r is not None and r.status_code in [200, 206]:
                     checkeds += 1
-                    if r.url not in unique_responses:
+                    if r.url not in unique_urls_batch:
                         try:
-                            content = r.content
+                            content = r.content  # letto una sola volta (fix bug #3)
                             content_len = len(content)
                         except:
                             r.close()
@@ -801,19 +806,20 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
                             continue
 
                         content_hash = hashlib.md5(content).hexdigest()
-                        if content_hash in seen_content_hashes:
-                            wildcard_strike_count += 1
+                        if content_hash in batch_seen_hashes:  # check solo nel batch corrente (fix bug #5)
+                            batch_wildcard_count += 1
                             r.close()
-                            if wildcard_strike_count >= 5:
+                            if batch_wildcard_count >= 5:
                                 fake_for_site = True
                                 print(f"  [!] DUP (5 duplicati) su {site_link} - NOPE", flush=True)
                                 break
                             continue
-                        seen_content_hashes.add(content_hash)
-                        unique_responses[r.url] = r
-                        findfile_requests.append(r)
-                    else:
-                        r.close()
+                        batch_seen_hashes.add(content_hash)
+                        unique_urls_batch.add(r.url)
+                        # Salva (url, testo) subito — r viene chiuso immediatamente (fix bug #3)
+                        content_str = content.decode('utf-8', errors='ignore')
+                        batch_requests.append((r.url, content_str))
+                    r.close()
                 else:
                     try: r.close()
                     except: pass
@@ -824,19 +830,11 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
                 print(f"  [!] DUPE PHP ({checkeds}+ link) su {site_link} - NOPE", flush=True)
                 break
 
-            # Deep extraction sui target validi
-            valid_responzzz = list(unique_responses.values())
-            if valid_responzzz:
-                print(f"  [DEEP] {len(valid_responzzz)} target validi, estrazione regex su {site_link}", flush=True)
+            # Deep extraction sui target validi del batch corrente (fix bug #4)
+            if batch_requests:
+                print(f"  [DEEP] {len(batch_requests)} target validi, estrazione regex su {site_link}", flush=True)
 
-                for r in findfile_requests:
-                    if r is None: continue
-                    try:
-                        contentsx = read_body(r)
-                    except:
-                        continue
-
-                    response_url = r.url
+                for response_url, contentsx in batch_requests:
                     for pattern in patterns:
                         is_regex = any(c in pattern for c in r".^$*+?{}[]\|()")
                         if is_regex: regex_pattern = pattern
@@ -881,8 +879,7 @@ def _scan_site(site_link, site_payloads, is_fallback=False):
                         except:
                             pass
 
-                    try: r.close()
-                    except: pass
+                        break  # trovato: esci dal loop batch_requests
 
             if fake_for_site or found_for_site: break
 
