@@ -76,8 +76,8 @@ BUNNY_STORAGE_URL = "https://storage.bunnycdn.com/datalg"
 BUNNY_API_KEY = "20e09264-6a0b-4c15-9500eb86adfd-cfc3-482e"
 
 # --- Fonti target ---
-LOAD_FROM_SITE = False
-LOAD_FROM_CIDR = True
+LOAD_FROM_SITE = True
+LOAD_FROM_CIDR = False
 
 # --- Reverse IP lookup dopo match trovato ---
 USE_REV = False
